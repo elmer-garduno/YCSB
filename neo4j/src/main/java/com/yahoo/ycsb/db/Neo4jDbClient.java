@@ -90,7 +90,7 @@ public class Neo4jDbClient extends DB {
       synchronized (LOCK) {
         if (GDS == null) {
           GraphDatabaseBuilder builder = new GraphDatabaseFactory()
-            .newEmbeddedDatabaseBuilder(url);
+              .newEmbeddedDatabaseBuilder(url);
           if (config != null) {
             builder.loadPropertiesFromFile(config);
           }
@@ -118,12 +118,17 @@ public class Neo4jDbClient extends DB {
    */
   public void cleanup() throws DBException {
     try {
-      synchronized (LOCK) {
-        instances--;
-        if (instances == 0) {
-          GDS.shutdown();
-          System.out.println("neo4j connection closed with @" + GDS);
+      if (mode == Mode.EMBEDDED) {
+        synchronized (LOCK) {
+          instances--;
+          if (instances == 0) {
+            GDS.shutdown();
+            System.out.println("neo4j connection closed with @" + GDS);
+          }
         }
+      } else {
+        gds.shutdown();
+        System.out.println("neo4j connection closed with @" + gds);
       }
     } catch (Exception e1) {
       System.err.println("Could not close MongoDB connection pool: "
@@ -233,8 +238,16 @@ public class Neo4jDbClient extends DB {
     try {
       IndexHits<Node> hits = index().get("_id", key);
       Node node = hits.getSingle();
+      if (node == null) {
+        return 1;
+      }
       if (fields != null) {
         for (String field : fields) {
+          String value = node.getProperty(field).toString();
+          result.put(field, new StringByteIterator(value));
+        }
+      } else {
+        for (String field : node.getPropertyKeys()) {
           String value = node.getProperty(field).toString();
           result.put(field, new StringByteIterator(value));
         }
@@ -261,35 +274,36 @@ public class Neo4jDbClient extends DB {
     try {
       if (mode == Mode.BATCH) {
         // Use doUpdate while doBatchUpdate is fixed
-        doUpdate(table, key, values); 
+        return doUpdate(table, key, values);
       } else {
-        doUpdate(table, key, values);
+        return doUpdate(table, key, values);
       }
-      return 0;
+      // return 0;
     } catch (Exception e) {
-      System.err.println("Error updating key: " + key);
       e.printStackTrace();
       return 1;
     }
   }
-  
-  private void doUpdate(String table, String key,
+
+  private int doUpdate(String table, String key,
       HashMap<String, ByteIterator> values) {
     Transaction tx = gds.beginTx();
     try {
       IndexHits<Node> hits = index().get("_id", key);
       Node node = hits.getSingle();
-      if (values != null) {
-        for (String k : values.keySet()) {
-          node.setProperty(k, values.get(k).toArray());
-        }
+      if (node == null) {
+        return 1;
+      }
+      for (String k : values.keySet()) {
+        node.setProperty(k, values.get(k).toArray());
       }
       tx.success();
+      return 0;
     } finally {
       tx.finish();
     }
   }
-  
+
   // TODO: This is broken investigate
   private void doBatchUpdate(String table, final String key,
       final HashMap<String, ByteIterator> values) {
@@ -308,7 +322,6 @@ public class Neo4jDbClient extends DB {
       }
     });
   }
-
 
   @Override
   @SuppressWarnings("unchecked")
