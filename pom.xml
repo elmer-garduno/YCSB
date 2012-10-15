@@ -76,6 +76,7 @@
     <module>orientdb</module>
     <!--module>nosqldb</module-->
     <module>redis</module>
+    <module>titan</module>
     <module>voldemort</module>
     <module>distribution</module>
   </modules>
