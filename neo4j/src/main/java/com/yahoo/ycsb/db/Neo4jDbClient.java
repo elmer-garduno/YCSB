@@ -18,6 +18,8 @@ import java.util.Vector;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Transaction;
+import org.neo4j.graphdb.factory.GraphDatabaseBuilder;
+import org.neo4j.graphdb.factory.GraphDatabaseFactory;
 import org.neo4j.graphdb.index.Index;
 import org.neo4j.graphdb.index.IndexHits;
 import org.neo4j.index.lucene.QueryContext;
@@ -65,13 +67,14 @@ public class Neo4jDbClient extends DB {
   public void init() throws DBException {
     // initialize MongoDb driver
     Properties props = getProperties();
-    String url = props.getProperty("neo4j.url", "data/ycsb");
+    String url = props.getProperty("neo4j.url", "data/neo4j/ycsb");
     String modeName = props.getProperty("neo4j.mode", "EMBEDDED");
+    String config = props.getProperty("neo4j.config");
     this.mode = Mode.valueOf(modeName);
     System.out.printf("Running on %s mode\n", mode);
     // database = props.getProperty("neo4j.database", "ycsb");
     try {
-      gds = initgdb(url);
+      gds = initgdb(url, config);
       System.out.println("neo4j connection created with " + url + "@" + gds);
     } catch (Exception e1) {
       System.err
@@ -82,17 +85,25 @@ public class Neo4jDbClient extends DB {
 
   }
 
-  private GraphDatabaseService initgdb(String url) {
+  private GraphDatabaseService initgdb(String url, String config) {
     if (mode == Mode.EMBEDDED) {
       synchronized (LOCK) {
         if (GDS == null) {
-          GDS = new EmbeddedGraphDatabase(url);
+          GraphDatabaseBuilder builder = new GraphDatabaseFactory()
+            .newEmbeddedDatabaseBuilder(url);
+          if (config != null) {
+            builder.loadPropertiesFromFile(config);
+          }
+          GDS = builder.newGraphDatabase();
+          GDS.index().forNodes(NODE_INDEX_NAME);
         }
         instances++;
         return GDS;
       }
     } else {
-      return new RestGraphDatabase(url + "/db/data/");
+      GraphDatabaseService gds = new RestGraphDatabase(url + "/db/data/");
+      gds.index().forNodes(NODE_INDEX_NAME);
+      return gds;
     }
   }
 
@@ -201,7 +212,7 @@ public class Neo4jDbClient extends DB {
         for (String k : values.keySet()) {
           node.setProperty(k, values.get(k).toArray());
         }
-        return new Object();
+        return node;
       }
     });
   }
@@ -247,24 +258,57 @@ public class Neo4jDbClient extends DB {
    */
   public int update(String table, String key,
       HashMap<String, ByteIterator> values) {
+    try {
+      if (mode == Mode.BATCH) {
+        // Use doUpdate while doBatchUpdate is fixed
+        doUpdate(table, key, values); 
+      } else {
+        doUpdate(table, key, values);
+      }
+      return 0;
+    } catch (Exception e) {
+      System.err.println("Error updating key: " + key);
+      e.printStackTrace();
+      return 1;
+    }
+  }
+  
+  private void doUpdate(String table, String key,
+      HashMap<String, ByteIterator> values) {
     Transaction tx = gds.beginTx();
     try {
       IndexHits<Node> hits = index().get("_id", key);
       Node node = hits.getSingle();
-      for (String k : values.keySet()) {
-        node.setProperty(k, values.get(k).toArray());
+      if (values != null) {
+        for (String k : values.keySet()) {
+          node.setProperty(k, values.get(k).toArray());
+        }
       }
-      index().remove(node, "_id", key);
-      index().add(node, "_id", key);
       tx.success();
-      return 0;
-    } catch (Exception e) {
-      e.printStackTrace();
-      return 1;
     } finally {
       tx.finish();
     }
   }
+  
+  // TODO: This is broken investigate
+  private void doBatchUpdate(String table, final String key,
+      final HashMap<String, ByteIterator> values) {
+    IndexHits<Node> hits = index().get("_id", key);
+    Node node = hits.getSingle();
+    final long id = node.getId();
+    RestAPI restAPI = ((RestGraphDatabase) gds).getRestAPI();
+    restAPI.executeBatch(new BatchCallback<Object>() {
+      @Override
+      public Object recordBatch(RestAPI batchRestApi) {
+        Node node = batchRestApi.getNodeById(id);
+        for (String k : values.keySet()) {
+          node.setProperty(k, values.get(k).toArray());
+        }
+        return node;
+      }
+    });
+  }
+
 
   @Override
   @SuppressWarnings("unchecked")
