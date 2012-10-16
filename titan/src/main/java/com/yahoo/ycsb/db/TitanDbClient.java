@@ -20,6 +20,7 @@ import org.apache.commons.configuration.Configuration;
 
 import com.thinkaurelius.titan.core.TitanFactory;
 import com.thinkaurelius.titan.core.TitanGraph;
+import com.thinkaurelius.titan.core.TitanTransaction;
 import com.tinkerpop.blueprints.TransactionalGraph.Conclusion;
 import com.tinkerpop.blueprints.Vertex;
 import com.yahoo.ycsb.ByteIterator;
@@ -48,7 +49,6 @@ public class TitanDbClient extends DB {
   private TitanGraph gds;
   private static Object LOCK = new Object();
   private static TitanGraph GDS;
-  private static int instances = 0;
   private Mode mode;
 
   @Override
@@ -76,32 +76,35 @@ public class TitanDbClient extends DB {
 
   }
 
+  private TitanGraph getEmbedded(String url) {
+    return TitanFactory.open(url);
+  }
+
+  private TitanGraph getCassandra(String url) {
+    Configuration conf = new BaseConfiguration();
+    conf.setProperty("storage.backend", "cassandra");
+    conf.setProperty("storage.hostname", url);
+    return TitanFactory.open(conf);
+  }
+
   private TitanGraph initgdb(String url) {
-    if (mode == Mode.EMBEDDED) {
+    if (mode == Mode.EMBEDDED || mode == Mode.CASSANDRA) {
       synchronized (LOCK) {
         if (GDS == null) {
-//          Configuration conf = new BaseConfiguration();
-//          conf.setProperty("storage.directory", url);
-//          conf.setProperty("storage.transactions", true);
-//          conf.setProperty("storage.backend", "local");
-          GDS = TitanFactory.open(url);
+          GDS = (mode == Mode.CASSANDRA) ? getCassandra(url) : getEmbedded(url);
           GDS.createKeyIndex(NODE_INDEX_NAME, Vertex.class);
+        } else {
+          throw new IllegalStateException(
+              "Only one thread allowed on EMBEDDED mode");
         }
-        instances++;
         return GDS;
       }
     } else {
-      Configuration conf = new BaseConfiguration();
-      conf.setProperty("storage.backend","cassandra");
-      conf.setProperty("storage.hostname",url);
-      TitanGraph gds = TitanFactory.open(conf);
-      try {
-        gds.createKeyIndex(NODE_INDEX_NAME, Vertex.class);
-      } catch (Exception e) {
-        System.out.println("Index already exists");
-        // Ignore index already exists for this instance
-      }
-      return gds;
+      // Configuration conf = new BaseConfiguration();
+      // conf.setProperty("storage.backend", "cassandra");
+      // conf.setProperty("storage.hostname", url);
+      // TitanGraph gds = TitanFactory.open(conf);
+      return null; // Rexster stuff;
     }
   }
 
@@ -112,12 +115,14 @@ public class TitanDbClient extends DB {
    */
   public void cleanup() throws DBException {
     try {
-      synchronized (LOCK) {
-        instances--;
-        if (instances == 0) {
-          GDS.shutdown();
-          System.out.println("titan connection closed with @" + GDS);
+      if (mode == Mode.EMBEDDED || mode == Mode.CASSANDRA) {
+        synchronized (LOCK) {
+            GDS.shutdown();
+            System.out.println("titan connection closed with @" + GDS);
         }
+      } else {
+        gds.shutdown();
+        System.out.println("titan connection closed with @" + gds);
       }
     } catch (Exception e1) {
       System.err.println("Could not close Titan connection pool: "
@@ -165,7 +170,7 @@ public class TitanDbClient extends DB {
    */
   public int insert(String table, final String key,
       final HashMap<String, ByteIterator> values) {
-    // TitanTransaction tx = gds.startTransaction();
+    //TitanTransaction tx = gds.startTransaction();
     try {
       Vertex vertex = gds.addVertex(null);
       vertex.setProperty("_id", key);
@@ -196,8 +201,16 @@ public class TitanDbClient extends DB {
       HashMap<String, ByteIterator> result) {
     try {
       Vertex vertex = getVertex("_id", key);
-      if (vertex != null && fields != null) {
+      if (vertex == null) {
+        return 1;
+      }
+      if (fields != null) {
         for (String field : fields) {
+          String value = vertex.getProperty(field).toString();
+          result.put(field, new StringByteIterator(value));
+        }
+      } else {
+        for (String field : vertex.getPropertyKeys()) {
           String value = vertex.getProperty(field).toString();
           result.put(field, new StringByteIterator(value));
         }
@@ -222,7 +235,10 @@ public class TitanDbClient extends DB {
   public int update(String table, String key,
       HashMap<String, ByteIterator> values) {
     try {
-      Vertex vertex = gds.getVertices("_id", key).iterator().next();
+      Vertex vertex = getVertex("_id", key);
+      if (vertex == null) {
+        return 1;
+      }
       for (String k : values.keySet()) {
         vertex.setProperty(k, values.get(k).toArray());
       }
